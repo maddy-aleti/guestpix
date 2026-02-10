@@ -7,3 +7,5 @@ node-gateway/package-lock.json
 sample_photos
 output_user_photos
 MONGODB_INTEGRATION.md
+config
+verify_cloudinary.py

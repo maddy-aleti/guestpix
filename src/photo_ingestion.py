@@ -11,6 +11,7 @@ from typing import List, Dict, Tuple, Optional, Any
 from PIL import Image
 import yaml
 from tqdm import tqdm
+from .cloudinary_service import CloudinaryService
 
 
 class PhotoIngestion:
@@ -41,6 +42,13 @@ class PhotoIngestion:
 
         # Create storage directory if it doesn't exist
         self.storage_path.mkdir(parents=True, exist_ok=True)
+        
+        # Initialize Cloudinary service
+        try:
+            self.cloudinary_service = CloudinaryService(config_path)
+        except Exception as e:
+            print(f"⚠ Cloudinary initialization skipped: {e}")
+            self.cloudinary_service = None
 
         # Store photo metadata (persisted across runs)
         self.photos_metadata = {}
@@ -146,29 +154,60 @@ class PhotoIngestion:
         # Check if photo is already in the storage directory
         photo_path_obj = Path(photo_path)
         file_ext = photo_path_obj.suffix.lower()  # Always get file extension
-
-        if photo_path_obj.parent == self.storage_path:
-            # Photo is already in storage directory, just use existing path
-            new_path = photo_path_obj
-            new_filename = photo_path_obj.name
-        else:
-            # Copy photo to storage with Photo ID as filename
-            new_filename = f"{photo_id}{file_ext}"
-            new_path = self.storage_path / new_filename
+        new_filename = f"{photo_id}{file_ext}"
+        
+        # Determine storage location and URL
+        stored_path = None
+        public_url = None
+        
+        # Upload to Cloudinary if enabled
+        if self.cloudinary_service and self.cloudinary_service.use_cloud_storage:
             try:
-                shutil.copy2(photo_path, new_path)
+                # Build public ID with folder structure (without the base folder prefix)
+                event_folder = event_id.replace(' ', '_').lower() if event_id else 'no_event'
+                photographer_folder = photographer_id.replace(' ', '_').lower() if photographer_id else 'no_photographer'
+                # Just pass the relative path, folder will be added by cloudinary_service
+                public_id = f"{event_folder}/{photographer_folder}/{photo_id}"
+                
+                # Upload to Cloudinary
+                upload_result = self.cloudinary_service.upload_photo(photo_path, public_id)
+                public_url = upload_result.get('secure_url')
+                stored_path = public_url
+                print(f"✓ Uploaded photo to Cloudinary: {stored_path}")
             except Exception as e:
-                raise IOError(f"Failed to copy photo {photo_path} to {new_path}: {e}")
+                print(f"✗ Failed to upload to Cloudinary, falling back to local storage: {e}")
+                # Fallback to local storage
+                new_path = self.storage_path / new_filename
+                try:
+                    shutil.copy2(photo_path, new_path)
+                    stored_path = str(new_path)
+                except Exception as e2:
+                    raise IOError(f"Failed to copy photo {photo_path} to {new_path}: {e2}")
+        else:
+            # Use local storage
+            if photo_path_obj.parent == self.storage_path:
+                # Photo is already in storage directory
+                new_path = photo_path_obj
+                stored_path = str(new_path)
+            else:
+                # Copy photo to storage
+                new_path = self.storage_path / new_filename
+                try:
+                    shutil.copy2(photo_path, new_path)
+                    stored_path = str(new_path)
+                except Exception as e:
+                    raise IOError(f"Failed to copy photo {photo_path} to {new_path}: {e}")
 
         # Store metadata
         self.photos_metadata[photo_id] = {
             'original_path': photo_path,
-            'stored_path': str(new_path),
+            'stored_path': stored_path,
             'filename': new_filename,
             'file_size': os.path.getsize(photo_path),
             'file_format': file_ext,
             'event_id': event_id,
             'photographer_id': photographer_id,
+            'public_url': public_url,
             'ingestion_timestamp': str(Path(photo_path).stat().st_mtime)
         }
         # IMPORTANT: Add the filename to the set for duplicate checking

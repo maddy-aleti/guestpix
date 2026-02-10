@@ -6,6 +6,8 @@ from pathlib import Path
 from typing import List, Dict, Optional
 
 import numpy as np
+import requests
+import tempfile
 
 # Local imports
 from .face_detection import FaceDetection
@@ -49,6 +51,43 @@ class GuestSearchMongoDB:
         self.output_dir.mkdir(exist_ok=True)
         self.user_output_dir = self.output_dir / "user_input"
         self.user_output_dir.mkdir(exist_ok=True)
+    
+    def _download_image_from_url(self, url: str) -> Optional[str]:
+        """
+        Download image from URL and save to temporary file.
+        
+        Args:
+            url: Cloudinary or other image URL
+            
+        Returns:
+            Path to temporary file or None if download failed
+        """
+        try:
+            response = requests.get(url, timeout=10)
+            response.raise_for_status()
+            
+            # Save to temporary file
+            with tempfile.NamedTemporaryFile(delete=False, suffix='.jpg') as tmp:
+                tmp.write(response.content)
+                return tmp.name
+        except Exception as e:
+            print(f"✗ Failed to download image from {url}: {e}")
+            return None
+    
+    def _handle_image_path(self, img_path: str) -> Optional[str]:
+        """
+        Handle both local file paths and URLs.
+        If URL, download first and return temp file path.
+        
+        Args:
+            img_path: Local file path or URL
+            
+        Returns:
+            Path to file (local or temp) or None
+        """
+        if img_path.startswith('http://') or img_path.startswith('https://'):
+            return self._download_image_from_url(img_path)
+        return img_path
 
     def process_photo(self, user_photo_path: str,
                       event_id: str,
@@ -71,16 +110,23 @@ class GuestSearchMongoDB:
         for idx, user_face in enumerate(user_faces, start=1):
             user_crop_path = user_face["crop_path"]
 
-            # Save cropped face copy for reference
+            # Handle URL if needed and save as reference
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             user_crop_name = f"user_crop_{timestamp}_{idx:03d}.jpg"
             user_saved_crop_path = self.user_output_dir / user_crop_name
-            try:
-                shutil.copy(user_crop_path, user_saved_crop_path)
-            except Exception:
-                # Best-effort; continue if copy fails
-                user_saved_crop_path = Path(user_crop_path)
-            print(f"✓ Saved cropped face to: {user_saved_crop_path}")
+            
+            # If it's a URL, download it first
+            actual_crop_path = self._handle_image_path(user_crop_path)
+            if actual_crop_path:
+                try:
+                    shutil.copy(actual_crop_path, user_saved_crop_path)
+                except Exception:
+                    # Best-effort; continue if copy fails
+                    user_saved_crop_path = Path(actual_crop_path) if actual_crop_path else Path(user_crop_path)
+                print(f"✓ Saved cropped face to: {user_saved_crop_path}")
+            else:
+                print(f"⚠ Could not process crop from: {user_crop_path}")
+                continue
 
             # Prepare output directory to collect all matched images for this face
             matches_root = self.output_dir / "matched_results"
@@ -93,7 +139,7 @@ class GuestSearchMongoDB:
             except Exception:
                 pass
 
-            # Generate embedding for the cropped face
+            # Generate embedding for the cropped face (handles both local and URL paths)
             embedding_vector = self.face_embedding.generate_embedding(user_crop_path)
             if embedding_vector is None:
                 print("✗ Failed to generate embedding for detected face; skipping")
@@ -129,10 +175,16 @@ class GuestSearchMongoDB:
                     # Save matched image into the face-specific output folder
                     if photo_path:
                         try:
-                            src_path = Path(str(photo_path))
+                            # Handle Cloudinary URLs
+                            actual_photo_path = self._handle_image_path(photo_path)
+                            if actual_photo_path is None:
+                                print(f"⚠ Could not download matched image from: {photo_path}")
+                                continue
+                            
+                            src_path = Path(str(actual_photo_path))
                             ext = src_path.suffix if src_path.suffix else ".jpg"
                             dest_name = f"rank_{rank:03d}_photo_{m['photo_id']}{ext}"
-                            shutil.copy(str(src_path), face_matches_dir / dest_name)
+                            shutil.copy(str(actual_photo_path), face_matches_dir / dest_name)
                         except Exception as e:
                             print(f"✗ Failed to copy matched image: {e}")
 

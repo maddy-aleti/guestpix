@@ -12,6 +12,7 @@ from deepface import DeepFace
 import yaml
 from tqdm import tqdm
 import json
+from .cloudinary_service import CloudinaryService
 
 
 class FaceDetection:
@@ -41,6 +42,13 @@ class FaceDetection:
         
         # Create output directory
         self.output_path.mkdir(parents=True, exist_ok=True)
+        
+        # Initialize Cloudinary service
+        try:
+            self.cloudinary_service = CloudinaryService(config_path)
+        except Exception as e:
+            print(f"⚠ Cloudinary initialization skipped: {e}")
+            self.cloudinary_service = None
         
         # Store face detection results
         self.detection_results = {}
@@ -93,6 +101,22 @@ class FaceDetection:
                     face_filename = f"{face_id}.jpg"
                     face_path = self.output_path / face_filename
                     cv2.imwrite(str(face_path), face_crop)
+                    
+                    # Upload to Cloudinary if enabled
+                    crop_url = None
+                    if self.cloudinary_service and self.cloudinary_service.use_cloud_storage:
+                        try:
+                            public_id = f"{face_id}"
+                            upload_result = self.cloudinary_service.upload_cropped_face(str(face_path), public_id)
+                            crop_url = upload_result.get('secure_url')
+                            print(f"✓ Uploaded cropped face to Cloudinary: {crop_url}")
+                        except Exception as e:
+                            print(f"✗ Failed to upload cropped face to Cloudinary: {e}")
+                            # Fall back to local path
+                            crop_url = str(face_path)
+                    else:
+                        crop_url = str(face_path)
+                    
                     face_info = {
                         'face_id': face_id,
                         'photo_id': photo_id,
@@ -101,7 +125,7 @@ class FaceDetection:
                         },
                         'confidence': confidence,
                         'face_size': (w, h),
-                        'crop_path': str(face_path),
+                        'crop_path': crop_url,
                         'detector_backend': backend
                     }
                     detected_faces.append(face_info)

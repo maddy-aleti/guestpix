@@ -12,7 +12,10 @@ import yaml
 from tqdm import tqdm
 import json
 import pickle
+import requests
+import tempfile
 from .store_embeddings import MongoDBStorage
+from .cloudinary_service import CloudinaryService
 
 
 class FaceEmbedding:
@@ -58,14 +61,57 @@ class FaceEmbedding:
             print(f"✗ Failed to initialize MongoDB storage: {e}")
             self.mongodb_storage = None
     
+    def _download_image_from_url(self, url: str) -> Optional[str]:
+        """
+        Download image from URL and save to temporary file.
+        
+        Args:
+            url: Cloudinary or other image URL
+            
+        Returns:
+            Path to temporary file or None if download failed
+        """
+        try:
+            response = requests.get(url, timeout=10)
+            response.raise_for_status()
+            
+            # Save to temporary file
+            with tempfile.NamedTemporaryFile(delete=False, suffix='.jpg') as tmp:
+                tmp.write(response.content)
+                return tmp.name
+        except Exception as e:
+            print(f"✗ Failed to download image from {url}: {e}")
+            return None
+    
+    def _get_image_path(self, img_path: str) -> Optional[str]:
+        """
+        Handle both local file paths and URLs.
+        If URL, download first and return temp file path.
+        
+        Args:
+            img_path: Local file path or URL
+            
+        Returns:
+            Path to file (local or temp)
+        """
+        if img_path.startswith('http://') or img_path.startswith('https://'):
+            return self._download_image_from_url(img_path)
+        return img_path
+    
     def _preprocess_arcface(self, img_path: str) -> Optional[np.ndarray]:
         """
         Load image, ensure RGB, resize to 112x112, and normalize per ArcFace.
         Returns float32 numpy array ready for model input.
+        Handles both local paths and Cloudinary URLs.
         """
         try:
             import cv2
-            img_bgr = cv2.imread(img_path)
+            # Handle URL if needed
+            actual_path = self._get_image_path(img_path)
+            if actual_path is None:
+                return None
+            
+            img_bgr = cv2.imread(actual_path)
             if img_bgr is None:
                 return None
             img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
@@ -122,14 +168,20 @@ class FaceEmbedding:
     def generate_embedding(self, face_image_path: str) -> Optional[np.ndarray]:
         """
         Generate embedding for a single face image.
+        Handles both local paths and Cloudinary URLs.
         
         Args:
-            face_image_path: Path to the cropped face image
+            face_image_path: Path to the cropped face image or URL
             
         Returns:
             Numerical embedding vector (numpy array) or None if failed
         """
         try:
+            # Handle URL if needed
+            actual_path = self._get_image_path(face_image_path)
+            if actual_path is None:
+                return None
+            
             # Standardize preprocessing for ArcFace
             if self.model_name.lower() == "arcface":
                 # Optional robustness via augmentation
@@ -137,7 +189,7 @@ class FaceEmbedding:
                 use_augmentation = bool(augmentation_cfg.get('enabled', False))
                 try:
                     import cv2
-                    img_bgr = cv2.imread(face_image_path)
+                    img_bgr = cv2.imread(actual_path)
                 except Exception:
                     img_bgr = None
 
@@ -153,14 +205,14 @@ class FaceEmbedding:
                         return None
                     embedding = np.mean(np.stack(vectors, axis=0), axis=0)
                 else:
-                    preprocessed = self._preprocess_arcface(face_image_path)
+                    preprocessed = self._preprocess_arcface(actual_path)
                     if preprocessed is None:
                         return None
                     embedding = self._generate_embedding_from_array(preprocessed)
             else:
                 # Fallback to DeepFace internal pipeline for other models
                 embedding = DeepFace.represent(
-                    img_path=face_image_path,
+                    img_path=actual_path,
                     model_name=self.model_name,
                     enforce_detection=self.enforce_detection,
                     align=self.align
